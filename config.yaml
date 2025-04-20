@@ -1,0 +1,17 @@
+server:
+  port: 9000
+  tail:
+    lines: 100  # Number of lines to keep in output buffer
+
+hooks:
+  - id: redeploy-webhook
+    execute-command: "/var/scripts/redeploy.sh"
+    command-working-directory: "/var/webhook"
+  
+  - id: backup-database
+    execute-command: "/usr/bin/pg_dump -U postgres mydb"
+    command-working-directory: "/var/backups"
+  
+  - id: test
+    execute-command: "echo 1 && echo 2 && echo 3"
+    command-working-directory: "/var/backups"
