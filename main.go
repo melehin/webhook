@@ -16,79 +16,12 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// Loki stream structs
-type lokiStream struct {
-	Stream map[string]string `json:"stream"`
-	Values [][]string        `json:"values"`
-}
-
-type lokiPushRequest struct {
-	Streams []lokiStream `json:"streams"`
-}
-
-// Config represents the YAML configuration structure
-type Config struct {
-	Server struct {
-		Port int `yaml:"port"`
-		Tail struct {
-			Lines int `yaml:"lines"`
-		} `yaml:"tail"`
-	} `yaml:"server"`
-	Loki struct {
-		Enabled   bool              `yaml:"enabled"`
-		URL       string            `yaml:"url"`
-		BatchWait int               `yaml:"batch_wait_seconds"`
-		BatchSize int               `yaml:"batch_size"`
-		Timeout   int               `yaml:"timeout_seconds"`
-		Labels    map[string]string `yaml:"labels"`
-	} `yaml:"loki"`
-	Hooks []Hook `yaml:"hooks"`
-}
-
-// Hook represents a single hook configuration
-type Hook struct {
-	ID                      string `yaml:"id"`
-	ExecuteCommand          string `yaml:"execute-command"`
-	CommandWorkingDirectory string `yaml:"command-working-directory"`
-}
-
 // CommandStatus represents the status of a running command
 type CommandStatus struct {
 	mu       sync.Mutex
 	running  bool
 	output   []string
 	lastExec time.Time
-}
-
-// Update the LokiClient struct and related methods
-type LokiClient struct {
-	url     string
-	client  *http.Client
-	entries chan lokiLogEntry
-	quit    chan struct{}
-	labels  model.LabelSet
-
-	batchWait int
-	batchSize int
-}
-
-type lokiLogEntry struct {
-	labelsStr string // Changed from model.LabelSet to string representation
-	labels    model.LabelSet
-	line      string
-	time      time.Time
-}
-
-func NewLokiClient(url string, batchWait, batchSize int, timeout time.Duration, labels model.LabelSet) *LokiClient {
-	return &LokiClient{
-		url:       url,
-		client:    &http.Client{Timeout: timeout},
-		entries:   make(chan lokiLogEntry, batchSize*2),
-		quit:      make(chan struct{}),
-		labels:    labels,
-		batchWait: batchWait,
-		batchSize: batchSize,
-	}
 }
 
 // Server holds the server state
