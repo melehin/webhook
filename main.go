@@ -12,8 +12,19 @@ import (
 	"sync"
 	"time"
 
+	"github.com/prometheus/common/model"
 	"gopkg.in/yaml.v3"
 )
+
+// Loki stream structs
+type lokiStream struct {
+	Stream map[string]string `json:"stream"`
+	Values [][]string        `json:"values"`
+}
+
+type lokiPushRequest struct {
+	Streams []lokiStream `json:"streams"`
+}
 
 // Config represents the YAML configuration structure
 type Config struct {
@@ -23,6 +34,14 @@ type Config struct {
 			Lines int `yaml:"lines"`
 		} `yaml:"tail"`
 	} `yaml:"server"`
+	Loki struct {
+		Enabled   bool              `yaml:"enabled"`
+		URL       string            `yaml:"url"`
+		BatchWait int               `yaml:"batch_wait_seconds"`
+		BatchSize int               `yaml:"batch_size"`
+		Timeout   int               `yaml:"timeout_seconds"`
+		Labels    map[string]string `yaml:"labels"`
+	} `yaml:"loki"`
 	Hooks []Hook `yaml:"hooks"`
 }
 
@@ -41,12 +60,44 @@ type CommandStatus struct {
 	lastExec time.Time
 }
 
+// Update the LokiClient struct and related methods
+type LokiClient struct {
+	url     string
+	client  *http.Client
+	entries chan lokiLogEntry
+	quit    chan struct{}
+	labels  model.LabelSet
+
+	batchWait int
+	batchSize int
+}
+
+type lokiLogEntry struct {
+	labelsStr string // Changed from model.LabelSet to string representation
+	labels    model.LabelSet
+	line      string
+	time      time.Time
+}
+
+func NewLokiClient(url string, batchWait, batchSize int, timeout time.Duration, labels model.LabelSet) *LokiClient {
+	return &LokiClient{
+		url:       url,
+		client:    &http.Client{Timeout: timeout},
+		entries:   make(chan lokiLogEntry, batchSize*2),
+		quit:      make(chan struct{}),
+		labels:    labels,
+		batchWait: batchWait,
+		batchSize: batchSize,
+	}
+}
+
 // Server holds the server state
 type Server struct {
 	config       Config
 	statuses     map[string]*CommandStatus
 	statusLock   sync.RWMutex
 	outputBuffer int
+	lokiClient   *LokiClient
 }
 
 func main() {
@@ -73,6 +124,25 @@ func main() {
 		outputBuffer: config.Server.Tail.Lines,
 	}
 
+	// Initialize Loki client if enabled
+	if config.Loki.Enabled {
+		labels := model.LabelSet{}
+		for k, v := range config.Loki.Labels {
+			labels[model.LabelName(k)] = model.LabelValue(v)
+		}
+		// Add hook_id label which will be set per request
+		labels["hook_id"] = ""
+
+		server.lokiClient = NewLokiClient(
+			config.Loki.URL,
+			config.Loki.BatchWait,
+			config.Loki.BatchSize,
+			time.Duration(config.Loki.Timeout)*time.Second,
+			labels,
+		)
+		go server.lokiClient.Run()
+	}
+
 	// Initialize statuses for all hooks
 	for _, hook := range config.Hooks {
 		server.statuses[hook.ID] = &CommandStatus{
@@ -83,7 +153,7 @@ func main() {
 	// Set up HTTP routes
 	http.HandleFunc("/hooks/", server.handleHook)
 	http.HandleFunc("/tail/", server.handleTail)
-	http.HandleFunc("/", server.handleRoot)
+	http.HandleFunc("/hooks", server.handleRoot)
 
 	// Start server
 	addr := fmt.Sprintf(":%d", config.Server.Port)
@@ -91,8 +161,104 @@ func main() {
 	log.Fatal(http.ListenAndServe(addr, nil))
 }
 
+func (c *LokiClient) Run() {
+	batch := make(map[string][]lokiLogEntry) // Changed map key to string
+	ticker := time.NewTicker(time.Duration(c.batchWait) * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-c.quit:
+			return
+		case e := <-c.entries:
+			batch[e.labelsStr] = append(batch[e.labelsStr], e)
+			if len(batch) >= c.batchSize {
+				c.sendBatch(batch)
+				batch = make(map[string][]lokiLogEntry)
+			}
+		case <-ticker.C:
+			if len(batch) > 0 {
+				c.sendBatch(batch)
+				batch = make(map[string][]lokiLogEntry)
+			}
+		}
+	}
+}
+
+func (c *LokiClient) sendBatch(batch map[string][]lokiLogEntry) {
+	var streams []lokiStream
+
+	log.Println(batch)
+
+	for _, entries := range batch {
+		if len(entries) == 0 {
+			continue
+		}
+
+		// Use labels from first entry (they're all the same for this key)
+		labels := entries[0].labels
+		var values [][]string
+
+		for _, entry := range entries {
+			ns := entry.time.UnixNano()
+			values = append(values, []string{
+				fmt.Sprintf("%d", ns),
+				entry.line,
+			})
+		}
+
+		stream := lokiStream{
+			Stream: make(map[string]string),
+			Values: values,
+		}
+
+		for k, v := range labels {
+			stream.Stream[string(k)] = string(v)
+		}
+
+		streams = append(streams, stream)
+	}
+
+	req := lokiPushRequest{
+		Streams: streams,
+	}
+
+	body, err := json.Marshal(req)
+	if err != nil {
+		log.Printf("Error marshaling Loki request: %v", err)
+		return
+	}
+
+	resp, err := c.client.Post(c.url+"/loki/api/v1/push", "application/json", bytes.NewReader(body))
+	if err != nil {
+		log.Printf("Error sending to Loki: %v", err)
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode/100 != 2 {
+		body, _ := io.ReadAll(resp.Body)
+		log.Printf("Error response from Loki: %s: %s", resp.Status, string(body))
+	}
+}
+
+func (c *LokiClient) PushLog(hookID, line string) {
+	labels := c.labels.Clone()
+	labels["hook_id"] = model.LabelValue(hookID)
+
+	// Create a string representation of the labels for use as map key
+	labelsStr := labels.String()
+
+	c.entries <- lokiLogEntry{
+		labelsStr: labelsStr,
+		labels:    labels,
+		line:      line,
+		time:      time.Now(),
+	}
+}
+
 func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Path != "/" {
+	if r.URL.Path != "/hooks" {
 		http.NotFound(w, r)
 		return
 	}
@@ -167,6 +333,7 @@ func (s *Server) handleHook(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// Modified executeCommand function with Loki support
 func (s *Server) executeCommand(hook *Hook, status *CommandStatus) {
 	defer func() {
 		status.mu.Lock()
@@ -177,29 +344,27 @@ func (s *Server) executeCommand(hook *Hook, status *CommandStatus) {
 	cmd := exec.Command("bash", "-c", hook.ExecuteCommand)
 	cmd.Dir = hook.CommandWorkingDirectory
 
-	// Create pipes for stdout and stderr
 	stdoutPipe, err := cmd.StdoutPipe()
 	if err != nil {
-		s.addOutput(status, fmt.Sprintf("Error creating stdout pipe: %v", err))
+		msg := fmt.Sprintf("Error creating stdout pipe: %v", err)
+		s.addOutput(hook.ID, status, msg)
 		return
 	}
 
 	stderrPipe, err := cmd.StderrPipe()
 	if err != nil {
-		s.addOutput(status, fmt.Sprintf("Error creating stderr pipe: %v", err))
+		msg := fmt.Sprintf("Error creating stderr pipe: %v", err)
+		s.addOutput(hook.ID, status, msg)
 		return
 	}
 
-	// Start the command
 	if err := cmd.Start(); err != nil {
-		s.addOutput(status, fmt.Sprintf("Error starting command: %v", err))
+		msg := fmt.Sprintf("Error starting command: %v", err)
+		s.addOutput(hook.ID, status, msg)
 		return
 	}
 
-	// Create multi-reader for stdout and stderr
 	outputReader := io.MultiReader(stdoutPipe, stderrPipe)
-
-	// Read output line by line
 	buf := make([]byte, 1024)
 	var lineBuf bytes.Buffer
 
@@ -208,8 +373,8 @@ func (s *Server) executeCommand(hook *Hook, status *CommandStatus) {
 		if n > 0 {
 			for i := 0; i < n; i++ {
 				if buf[i] == '\n' {
-					// Complete line found
-					s.addOutput(status, lineBuf.String())
+					line := lineBuf.String()
+					s.addOutput(hook.ID, status, line)
 					lineBuf.Reset()
 				} else {
 					lineBuf.WriteByte(buf[i])
@@ -218,30 +383,36 @@ func (s *Server) executeCommand(hook *Hook, status *CommandStatus) {
 		}
 		if err != nil {
 			if err != io.EOF {
-				s.addOutput(status, fmt.Sprintf("Error reading output: %v", err))
+				msg := fmt.Sprintf("Error reading output: %v", err)
+				s.addOutput(hook.ID, status, msg)
 			}
 			break
 		}
 	}
 
-	// Wait for command to finish
 	if err := cmd.Wait(); err != nil {
-		s.addOutput(status, fmt.Sprintf("Command finished with error: %v", err))
+		msg := fmt.Sprintf("Command finished with error: %v", err)
+		s.addOutput(hook.ID, status, msg)
 	} else {
-		s.addOutput(status, "Command finished successfully")
+		msg := "Command finished successfully"
+		s.addOutput(hook.ID, status, msg)
 	}
 }
 
-func (s *Server) addOutput(status *CommandStatus, line string) {
+// Modified addOutput function with Loki support
+func (s *Server) addOutput(hookID string, status *CommandStatus, line string) {
 	status.mu.Lock()
 	defer status.mu.Unlock()
 
-	// Add new line to output
+	// Add to local buffer
 	status.output = append(status.output, line)
-
-	// Trim output if it exceeds the buffer size
 	if len(status.output) > s.outputBuffer {
 		status.output = status.output[len(status.output)-s.outputBuffer:]
+	}
+
+	// Send to Loki if enabled
+	if s.lokiClient != nil {
+		s.lokiClient.PushLog(hookID, line)
 	}
 }
 

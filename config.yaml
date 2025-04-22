@@ -1,17 +1,20 @@
 server:
   port: 9000
   tail:
-    lines: 100  # Number of lines to keep in output buffer
+    lines: 100
+
+loki:
+  enabled: true
+  url: "http://localhost:3100"  # Loki endpoint
+  batch_wait_seconds: 2         # Wait up to 2 seconds before sending a batch
+  batch_size: 100               # Send batch when it reaches 100 entries
+  timeout_seconds: 10           # HTTP timeout
+  labels:
+    job: "webhook-server"
+    app: "command-executor"
+    environment: "production"
 
 hooks:
   - id: redeploy-webhook
-    execute-command: "/var/scripts/redeploy.sh"
-    command-working-directory: "/var/webhook"
-  
-  - id: backup-database
-    execute-command: "/usr/bin/pg_dump -U postgres mydb"
-    command-working-directory: "/var/backups"
-  
-  - id: test
-    execute-command: "echo 1 && echo 2 && echo 3"
-    command-working-directory: "/var/backups"
+    execute-command: "echo 1 && echo 2 && echo 3 && echo redeploy-webhook"
+    command-working-directory: "/var/"
