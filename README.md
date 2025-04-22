@@ -35,7 +35,7 @@ go build -o webhook-executor
 ./webhook-executor
 ```
 
-# Configuration
+## Configuration
 
 Edit __config.yaml__ to customize your setup:
 
@@ -66,7 +66,7 @@ hooks:
     command-working-directory: "/backups"
 ```
 
-# API Endpoints
+## API Endpoints
 
 | Endpoint | Method |	Description |
 |------|-----|------|
@@ -74,7 +74,7 @@ hooks:
 | /tail/{hook-id} | GET | View command status and output |
 | /hooks | GET | List all available hooks |
 
-# Grafana Integration (optional)
+## Grafana Integration (optional)
 
 1. __Set up Loki datasource__ in Grafana pointing to your Loki instance
 2. __Import the dashboard__ from __grafana-dashboard.json__
@@ -83,15 +83,15 @@ hooks:
 {job="webhook-server", hook_id="redeploy-webhook"}
 ```
 
-# Security Considerations
+## Security Considerations
 
 1. Run behind a reverse proxy with HTTPS
 2. Add authentication middleware
 3. Restrict network access to the service
 4. Set appropriate file permissions for scripts
 
-# Deployment
-## Systemd Service
+## Deployment
+### Systemd Service
 ```ini
 # /etc/systemd/system/webhook-executor.service
 [Unit]
@@ -108,7 +108,7 @@ Restart=always
 WantedBy=multi-user.target
 ```
 
-## Docker
+### Docker
 ```bash
 docker build -t webhook-executor .
 docker run -d -p 9000:9000 \
@@ -117,7 +117,7 @@ docker run -d -p 9000:9000 \
   webhook-executor
 ```
 
-## Development
+### Development
 ```bash
 # Run tests
 go test ./...
