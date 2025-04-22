@@ -25,7 +25,7 @@ A lightweight Go service that executes commands via webhooks and streams logs to
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/webhook-executor.git
+git clone https://github.com/melehin/webhook-executor.git
 cd webhook-executor
 
 # Build the binary
