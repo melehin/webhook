@@ -1,0 +1,27 @@
+version: '3.8'
+
+services:
+  webhook-executor:
+    image: webhook-executor
+    build: .
+    ports:
+      - "9000:9000"
+    volumes:
+      - ./config.yaml:/app/config.yaml
+      - ./scripts:/scripts
+    restart: unless-stopped
+    environment:
+      - TZ=UTC
+    depends_on:
+      - loki
+
+  loki:
+    image: grafana/loki:2.8.0
+    ports:
+      - "3100:3100"
+    volumes:
+      - loki-data:/loki
+    command: -config.file=/etc/loki/local-config.yaml
+
+volumes:
+  loki-data:
